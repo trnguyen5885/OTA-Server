@@ -3,7 +3,15 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const controller = require('./controller');
+
+// Tạo thư mục uploads nếu chưa tồn tại
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    console.log('📁 Created uploads directory');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
