@@ -1,9 +1,23 @@
-const Release = require('./models/Release'); // Import Model
+// controllers/releaseController.js
+const Release = require('./models/Release');
 const semver = require('semver');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto'); // ← THÊM: Để tính SHA256
 
-// 1. API: Kiểm tra cập nhật
+// Hàm helper: Tính SHA256 hash của file
+const calculateFileHash = (filePath) => {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('sha256');
+        const stream = fs.createReadStream(filePath);
+
+        stream.on('data', (data) => hash.update(data));
+        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('error', (error) => reject(error));
+    });
+};
+
+// 1. API: Kiểm tra cập nhật (ĐÃ CẬP NHẬT)
 exports.checkUpdate = async (req, res) => {
     try {
         const { currentAppVersion, currentBundleVersion } = req.query;
@@ -12,7 +26,6 @@ exports.checkUpdate = async (req, res) => {
             return res.status(400).json({ message: "Thiếu thông tin version" });
         }
 
-        // Tìm trong DB các bản active và khớp appVersion
         const compatibleReleases = await Release.find({
             appVersion: currentAppVersion,
             isActive: true
@@ -22,13 +35,10 @@ exports.checkUpdate = async (req, res) => {
             return res.json({ updateAvailable: false, message: "No compatible releases" });
         }
 
-        // Sort bằng semver (DB sort string không chính xác với semver nên ta sort bằng code JS)
         compatibleReleases.sort((a, b) => semver.rcompare(a.bundleVersion, b.bundleVersion));
         const latestRelease = compatibleReleases[0];
 
-        // So sánh version
         if (semver.gt(latestRelease.bundleVersion, currentBundleVersion)) {
-            // Tạo URL download động dựa trên domain hiện tại
             const protocol = req.protocol;
             const host = req.get('host');
             const downloadUrl = `${protocol}://${host}/uploads/${latestRelease.fileName}`;
@@ -36,7 +46,8 @@ exports.checkUpdate = async (req, res) => {
             return res.json({
                 updateAvailable: true,
                 bundleVersion: latestRelease.bundleVersion,
-                downloadUrl: downloadUrl, // URL trỏ về server mình
+                downloadUrl: downloadUrl,
+                fileHash: latestRelease.fileHash, // ← THÊM: Trả về fileHash
                 forceUpdate: latestRelease.forceUpdate,
                 description: latestRelease.description
             });
@@ -50,28 +61,32 @@ exports.checkUpdate = async (req, res) => {
     }
 };
 
-// 2. API: Publish Release (Upload file ZIP)
+// 2. API: Publish Release (ĐÃ CẬP NHẬT)
 exports.publishRelease = async (req, res) => {
     try {
         const { appVersion, bundleVersion, forceUpdate, description } = req.body;
-        const file = req.file; // File do Multer xử lý
+        const file = req.file;
 
         if (!file) {
             return res.status(400).json({ message: "Vui lòng upload file bundle (.zip)" });
         }
 
         if (!semver.valid(bundleVersion)) {
-            // Nếu lỗi, xóa file đã upload để tránh rác
             fs.unlinkSync(file.path);
             return res.status(400).json({ message: "Invalid Bundle Version format" });
         }
+
+        // ← THÊM: Tính SHA256 hash của file
+        const fileHash = await calculateFileHash(file.path);
+        console.log(`Calculated SHA256 hash for ${file.filename}: ${fileHash}`);
 
         // Lưu vào MongoDB
         const newRelease = new Release({
             appVersion,
             bundleVersion,
-            fileName: file.filename, // Lưu tên file multer đã đặt (có timestamp)
-            forceUpdate: forceUpdate === 'true' || forceUpdate === true, // Xử lý form-data gửi bool dưới dạng string
+            fileName: file.filename,
+            fileHash: fileHash, // ← THÊM: Lưu hash vào DB
+            forceUpdate: forceUpdate === 'true' || forceUpdate === true,
             description,
             isActive: true
         });
@@ -82,20 +97,23 @@ exports.publishRelease = async (req, res) => {
 
     } catch (error) {
         console.error(error);
+        // Xóa file nếu có lỗi
+        if (req.file && req.file.path) {
+            fs.unlinkSync(req.file.path);
+        }
         res.status(500).json({ message: "Error publishing release" });
     }
 };
 
-// 3. API: Rollback
+// 3. API: Rollback (KHÔNG THAY ĐỔI)
 exports.rollback = async (req, res) => {
     try {
         const { bundleVersionToDisable } = req.body;
 
-        // Tìm và update trong DB
         const updatedRelease = await Release.findOneAndUpdate(
             { bundleVersion: bundleVersionToDisable },
             { isActive: false },
-            { new: true } // Trả về object sau khi update
+            { new: true }
         );
 
         if (!updatedRelease) {
